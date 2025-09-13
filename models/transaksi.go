@@ -53,13 +53,6 @@ func ProcessTransaksiFIFO(trx utils.Transaksi) error {
 		return fmt.Errorf("gagal parsing jam: %v", err)
 	}
 
-	//gak jadi dipake
-	// // Parse tanggal ke time.Time untuk stok_riwayat
-	// tglTx, err := time.Parse("2006-01-02", trx.Tanggal)
-	// if err != nil {
-	// 	return fmt.Errorf("format tanggal transaksi tidak valid (harus YYYY-MM-DD): %v", err)
-	// }
-
 	res, err := tx.Exec(penjualanQuery, trx.Tanggal, parsedJam.Format("15:04:05"), "KASIR 01", trx.Metode, trx.Subtotal, trx.Subtotal, 0)
 	if err != nil {
 		return fmt.Errorf("insert penjualan error: %v", err)
@@ -80,7 +73,6 @@ func ProcessTransaksiFIFO(trx utils.Transaksi) error {
 		log.Printf("📦 Proses barang: %s x%d\n", item.Nama, item.Jumlah)
 		// Cari barang_id
 		var barangID int
-		// err := tx.QueryRow("SELECT barang_id FROM barang WHERE nama_barang LIKE ?", "%"+item.Nama+"%").Scan(&barangID)
 		err := tx.QueryRow(`SELECT barang_id FROM barang WHERE is_active = 1 AND nama_barang LIKE ? LIMIT 1`, "%"+item.Nama+"%").Scan(&barangID)
 		if err != nil {
 			fmt.Println("Barang tidak ditemukan di DB:", item.Nama)
@@ -161,7 +153,7 @@ func ProcessTransaksiFIFO(trx utils.Transaksi) error {
 		}
 	}
 
-	log.Printf("✅ Total HPP transaksi: %.2f\n", totalHPP)
+	log.Printf("Total HPP transaksi: %.2f\n", totalHPP)
 
 	// 3. Insert jurnal transaksi
 	jurnalQuery := `INSERT INTO jurnal (tanggal, referensi, tipe_jurnal, user_id) VALUES (?, ?, ?, ?)`
