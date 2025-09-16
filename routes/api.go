@@ -38,17 +38,18 @@ func SetupRoutes(app *fiber.App) {
 
 	//upload data
 	app.Post("/api/xjd/upload", handlers.UploadXJDHandler)
+	app.Post("/api/xjd/preview", handlers.PreviewXJDHandler)
 	app.Post("/api/upload-barang-csv", controllers.UploadBarangCSV)
 
 	//inventory
 	app.Post("/api/barang/manual", controllers.AddProductManual)
 	app.Get("/api/barang", controllers.GetBarang)
+	app.Post("/api/barang/export-csv", controllers.ExportBarangCSV)
 	app.Put("/api/barang/:kode_barang", controllers.UpdateBarang)
 	app.Delete("/api/barang/:kode_barang", controllers.DeleteBarang)
 	app.Post("/api/barang/bulk-delete", controllers.BulkDeleteBarang)
 	app.Post("/api/barang/:kode_barang/restore", controllers.RestoreBarang)
 	app.Get("/api/barang/:kode_barang/fifo-harga", controllers.GetFIFOHarga)
-	// app.Get("/api/barang/:kode_barang/detail-masuk", controllers.GetBarangMasukDetail)
 	app.Get("/api/barang/:kode_barang/masuk", controllers.GetBarangMasukByKode)
 	app.Put("/api/barang-masuk/:masuk_id", controllers.UpdateBarangMasuk)
 	//autofill

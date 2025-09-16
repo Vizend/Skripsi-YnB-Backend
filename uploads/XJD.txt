@@ -1,20 +1,8 @@
 ----------------------------------------
 KASIR 01                           0.000  
         1   GSTAR CN KEJU         42.500  
-        1   Klt DIMSUM MB         11.000  
-            SUBTOTAL              53.500  
-            CASH                  55.000  
-            CHANGE                 1.500  
+        1   UMIAMI SU 500G        16.500  
+            SUBTOTAL              59.000  
+            CASH                  59.000    
                 KASIR 01                  
-  001 001 000019 0001 10/08/2025 10:38    
-KASIR 01                           0.000  
-        1   DELM EXTRA PED         6.500  
-        1   DELM SAOS TOMA         6.000  
-        1   MAESTRO Mayona         8.500  
-        1   CHAMP SOSIS AY        18.000  
-        1   KANZLER CRISPY        41.000  
-            SUBTOTAL              80.000  
-            CASH                 100.000  
-            CHANGE                20.000  
-                KASIR 01                  
-  001 001 000020 0001 11/08/2025 11:10    
+  001 001 000027 0001 13/09/2025 12:38    

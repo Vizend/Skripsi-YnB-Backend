@@ -3,14 +3,27 @@ package models
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"math"
+	"strings"
 	"time"
 	"ynb-backend/utils"
 )
 
+type barangCandidate struct {
+	ID        int
+	Nama      string
+	HargaJual int64 // asumsi kolom integer/decimal dibaca ke int64
+	Score     float64
+	PriceDiff int64
+}
+
+type ProcessOpts struct {
+	DryRun bool // untuk preview
+}
+
 const (
 	KODE_KAS        = "1-101"
+	KODE_BANK       = "1-102"
 	KODE_PENJUALAN  = "4-101"
 	KODE_PERSEDIAAN = "1-104"
 	KODE_HPP        = "5-100"
@@ -19,189 +32,254 @@ const (
 var DB *sql.DB // diset di main.go
 
 func ProcessTransaksiFIFO(trx utils.Transaksi) error {
-	fmt.Println("DB status OK. Mulai proses transaksi FIFO...")
+	return ProcessTransaksiFIFOWithOpts(trx, ProcessOpts{DryRun: false})
+}
 
+func ProcessTransaksiFIFOWithOpts(trx utils.Transaksi, opts ProcessOpts) (retErr error) {
 	if DB == nil {
-		return fmt.Errorf("Koneksi DB nil di models.ProcessTransaksiFIFO")
+		return fmt.Errorf("DB nil")
 	}
-
 	if err := DB.Ping(); err != nil {
-		return fmt.Errorf("Ping DB gagal: %v", err)
+		return fmt.Errorf("ping DB gagal: %v", err)
 	}
-
-	log.Println("⏳ Memulai transaksi FIFO...")
+	if trx.Tanggal == "" {
+		return fmt.Errorf("Tanggal kosong")
+	}
 
 	tx, err := DB.Begin()
 	if err != nil {
-		return fmt.Errorf("gagal mulai transaksi: %v", err)
+		return fmt.Errorf("begin tx gagal: %v", err)
 	}
 	defer func() {
-		if err != nil {
-			tx.Rollback()
+		if retErr != nil || opts.DryRun {
+			_ = tx.Rollback()
+		} else {
+			if err := tx.Commit(); err != nil {
+				retErr = fmt.Errorf("commit gagal: %v", err)
+			}
 		}
 	}()
 
-	if trx.Tanggal == "" {
-		return fmt.Errorf("Tanggal transaksi kosong, tidak bisa disimpan")
+	// --- Cek duplikat per (tanggal, refno) ---
+	if trx.RefNo != "" {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM penjualan WHERE tanggal = ? AND referensi_xjd = ?`, trx.Tanggal, trx.RefNo).Scan(&n); err != nil {
+			return fmt.Errorf("cek duplikat gagal: %v", err)
+		}
+		if n > 0 {
+			return fmt.Errorf("duplikat: transaksi dengan refno %s pada %s sudah ada", trx.RefNo, trx.Tanggal)
+		}
 	}
 
-	// 1. Insert ke penjualan
-	penjualanQuery := `INSERT INTO penjualan (tanggal, jam, kasir, metode_bayar, subtotal, bayar, kembalian) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	// Konversi jam string ke time.Time
+	// --- Insert penjualan ---
+	// fallback bayar/kembalian bila parser tidak mengisi
+	bayar := trx.Bayar
+	if bayar <= 0 {
+		bayar = trx.Subtotal
+	}
+	kemb := trx.Kembalian
+	if kemb < 0 {
+		kemb = 0
+	}
+
 	parsedJam, err := time.Parse("15:04", trx.Jam)
 	if err != nil {
-		return fmt.Errorf("gagal parsing jam: %v", err)
+		return fmt.Errorf("jam invalid: %v", err)
 	}
 
-	res, err := tx.Exec(penjualanQuery, trx.Tanggal, parsedJam.Format("15:04:05"), "KASIR 01", trx.Metode, trx.Subtotal, trx.Subtotal, 0)
+	penjualanQuery := `INSERT INTO penjualan (tanggal, jam, kasir, metode_bayar, subtotal, bayar, kembalian, referensi_xjd)
+                    	VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	res, err := tx.Exec(penjualanQuery, trx.Tanggal, parsedJam.Format("15:04:05"), "KASIR 01", trx.Metode, trx.Subtotal, bayar, kemb, nullIfEmpty(trx.RefNo))
 	if err != nil {
-		return fmt.Errorf("insert penjualan error: %v", err)
+		return fmt.Errorf("insert penjualan: %v", err)
 	}
 	penjualanID, _ := res.LastInsertId()
 
-	log.Printf("✅ Penjualan #%d berhasil dimasukkan\n", penjualanID)
-
-	var totalHPP float64
-	// parse tanggal transaksi (YYYY-MM-DD)
 	trxDate, _ := time.Parse("2006-01-02", trx.Tanggal)
-
 	if err := ensureMonthlyCarryForward(tx, trxDate.Year(), int(trxDate.Month())); err != nil {
 		return fmt.Errorf("carry-forward stok gagal: %v", err)
 	}
 
-	for _, item := range trx.Items {
-		log.Printf("📦 Proses barang: %s x%d\n", item.Nama, item.Jumlah)
-		// Cari barang_id
-		var barangID int
-		err := tx.QueryRow(`SELECT barang_id FROM barang WHERE is_active = 1 AND nama_barang LIKE ? LIMIT 1`, "%"+item.Nama+"%").Scan(&barangID)
+	var totalHPP float64
+
+	for _, it := range trx.Items {
+		// --- cari barang ---
+		barangID, _, err := findBarangID(tx, it.Nama, it.Harga)
 		if err != nil {
-			fmt.Println("Barang tidak ditemukan di DB:", item.Nama)
-			continue // Skip jika barang tidak ditemukan
+			// barang tidak ketemu => untuk DryRun: cukup warning, untuk commit: gagal atau lewati?
+			if opts.DryRun {
+				// cukup teruskan; preview akan laporkan item unmatched
+				continue
+			}
+			// kamu bisa pilih: return error (fail-fast) atau skip.
+			// Di sini aku pilih fail-fast agar HPP tidak salah.
+			return fmt.Errorf("barang tidak ditemukan: %s (harga %.0f)", it.Nama, it.Harga)
 		}
 
-		// Insert ke detail_penjualan
-		_, err = tx.Exec(`INSERT INTO detail_penjualan (penjualan_id, barang_id, jumlah, harga_satuan, total) VALUES (?, ?, ?, ?, ?)`,
-			penjualanID, barangID, item.Jumlah, item.Harga, item.Harga*float64(item.Jumlah),
-		)
-		if err != nil {
-			return err
-		}
-
-		// Sinkronkan harga_jual barang dengan harga di transaksi (update ke latest price)
-		rounded := int64(math.Round(item.Harga))
+		// sinkron harga_jual → set ke harga terbaru dari TXT
+		rounded := int64(math.Round(it.Harga))
 		var current sql.NullInt64
 		if err := tx.QueryRow(`SELECT CAST(harga_jual AS SIGNED) FROM barang WHERE barang_id = ?`, barangID).Scan(&current); err != nil {
-			return fmt.Errorf("gagal baca harga_jual barang_id %d: %v", barangID, err)
+			return fmt.Errorf("read harga_jual: %v", err)
 		}
 		if !current.Valid || current.Int64 != rounded {
 			if _, err := tx.Exec(`UPDATE barang SET harga_jual = ? WHERE barang_id = ?`, rounded, barangID); err != nil {
-				return fmt.Errorf("gagal update harga_jual barang_id %d: %v", barangID, err)
+				return fmt.Errorf("update harga_jual: %v", err)
 			}
-			log.Printf("🔁 Update harga_jual barang_id %d → %d\n", barangID, rounded)
 		}
 
-		// FIFO: ambil stok lama dari barang_masuk
-		jumlahSisa := item.Jumlah
-		// HPP akumulasi khusus untuk barang ini (untuk stok_riwayat)
-		var hppItem float64
-		rows, err := DB.Query(`SELECT masuk_id, harga_beli, sisa_stok FROM barang_masuk 
-			WHERE barang_id = ? AND sisa_stok > 0 ORDER BY tanggal ASC`, barangID)
+		if opts.DryRun {
+			// preview tidak memodifikasi stok & detail
+			continue
+		}
+
+		// detail_penjualan
+		if _, err := tx.Exec(`INSERT INTO detail_penjualan (penjualan_id, barang_id, jumlah, harga_satuan, total)
+                            	VALUES (?,?,?,?,?)`,
+			penjualanID, barangID, it.Jumlah, it.Harga, it.Harga*float64(it.Jumlah)); err != nil {
+			return fmt.Errorf("insert detail_penjualan: %v", err)
+		}
+
+		// --- Ambil semua lot stok dulu, tutup rows, baru mutasi (hindari bad connection) ---
+		type lot struct {
+			masukID   int
+			hargaBeli float64
+			sisa      int
+		}
+
+		q := `SELECT masuk_id, harga_beli, sisa_stok
+				FROM barang_masuk
+				WHERE barang_id = ? AND sisa_stok > 0
+				ORDER BY tanggal ASC
+				`
+		rows, err := tx.Query(q, barangID)
 		if err != nil {
-			return err
+			return fmt.Errorf("query stok masuk: %w", err)
 		}
-		defer rows.Close() // 🔥 Tambahkan ini segera setelah Query()
 
-		for rows.Next() && jumlahSisa > 0 {
-			var masukID, sisa int
-			var hargaBeli float64
-			// rows.Scan(&masukID, &hargaBeli, &sisa)
-			if err := rows.Scan(&masukID, &hargaBeli, &sisa); err != nil {
-				return err
+		var lots []lot
+		for rows.Next() {
+			var l lot
+			if err := rows.Scan(&l.masukID, &l.hargaBeli, &l.sisa); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan stok masuk: %w", err)
+			}
+			lots = append(lots, l)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close rows stok masuk: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iter stok masuk: %w", err)
+		}
+
+		// --- Mutasi stok & catat HPP setelah rows tertutup ---
+		jumlahSisa := it.Jumlah
+		var hppItem float64
+		for _, l := range lots {
+			if jumlahSisa <= 0 {
+				break
+			}
+			jml := min(jumlahSisa, l.sisa)
+			if jml <= 0 {
+				continue
 			}
 
-			jml := min(jumlahSisa, sisa)
-
-			// Insert barang_keluar
-			_, err = tx.Exec(`INSERT INTO barang_keluar (penjualan_id, barang_id, masuk_id, jumlah, harga_beli) VALUES (?, ?, ?, ?, ?)`,
-				penjualanID, barangID, masukID, jml, hargaBeli)
-			if err != nil {
-				return err
+			if _, err := tx.Exec(
+				`INSERT INTO barang_keluar (penjualan_id, barang_id, masuk_id, jumlah, harga_beli)
+        		VALUES (?,?,?,?,?)`,
+				penjualanID, barangID, l.masukID, jml, l.hargaBeli,
+			); err != nil {
+				return fmt.Errorf("insert barang_keluar: %w", err)
 			}
 
-			// Update barang_masuk sisa_stok
-			_, err = tx.Exec(`UPDATE barang_masuk SET sisa_stok = sisa_stok - ? WHERE masuk_id = ?`, jml, masukID)
-			if err != nil {
-				return fmt.Errorf("update stok masuk gagal: %v", err)
+			if _, err := tx.Exec(
+				`UPDATE barang_masuk SET sisa_stok = sisa_stok - ? WHERE masuk_id = ?`,
+				jml, l.masukID,
+			); err != nil {
+				return fmt.Errorf("update sisa_stok: %w", err)
 			}
 
-			totalHPP += float64(jml) * hargaBeli
-			hppItem += float64(jml) * hargaBeli
+			totalHPP += float64(jml) * l.hargaBeli
+			hppItem += float64(jml) * l.hargaBeli
 			jumlahSisa -= jml
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("error saat iterasi stok masuk: %v", err)
-		}
 
-		// === Rekap ke stok_riwayat untuk barang ini ===
-		if err := UpdateStokPenjualan(tx, barangID, trxDate, hppItem, float64(item.Jumlah)); err != nil {
-			return fmt.Errorf("gagal update stok_riwayat (penjualan) barang_id %d: %v", barangID, err)
+		if err := UpdateStokPenjualan(tx, barangID, trxDate, hppItem, float64(it.Jumlah)); err != nil {
+			return fmt.Errorf("stok_riwayat update: %v", err)
 		}
-
 		if err := CascadeCarryForward(tx, barangID, trxDate); err != nil {
-			return fmt.Errorf("gagal cascade carry-forward (penjualan) barang_id %d: %v", barangID, err)
+			return fmt.Errorf("cascade carry-forward: %v", err)
 		}
 	}
 
-	log.Printf("Total HPP transaksi: %.2f\n", totalHPP)
+	if opts.DryRun {
+		return nil
+	}
 
-	// 3. Insert jurnal transaksi
-	jurnalQuery := `INSERT INTO jurnal (tanggal, referensi, tipe_jurnal, user_id) VALUES (?, ?, ?, ?)`
-	res, err = tx.Exec(jurnalQuery, trx.Tanggal, fmt.Sprintf("PJ-%d", penjualanID), "Penjualan", 1)
+	// jurnal
+	var akunKas, akunBank, akunPenj, akunPers, akunHPP int
+	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun=?`, KODE_KAS).Scan(&akunKas); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun=?`, KODE_BANK).Scan(&akunBank); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun=?`, KODE_PENJUALAN).Scan(&akunPenj); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun=?`, KODE_PERSEDIAAN).Scan(&akunPers); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun=?`, KODE_HPP).Scan(&akunHPP); err != nil {
+		return err
+	}
+
+	// Net cash-in: bayar - kembalian; fallback ke subtotal jika tidak valid/negatif
+	kasMasuk := bayar - kemb
+	if kasMasuk <= 0 {
+		kasMasuk = trx.Subtotal
+	}
+
+	// Pilih akun debit berdasarkan metode bayar
+	pay := strings.ToUpper(strings.TrimSpace(trx.Metode))
+	debitAkun := akunKas
+	switch pay {
+	case "CASH":
+		debitAkun = akunKas
+	case "BCA", "QRIS", "DEBIT", "TRANSFER":
+		debitAkun = akunBank
+	default:
+		// fallback kalau ada metode baru yang belum ditangani
+		debitAkun = akunKas
+	}
+
+	res, err = tx.Exec(`INSERT INTO jurnal (tanggal, referensi, tipe_jurnal, user_id)
+                        VALUES (?,?,?,?)`,
+		trx.Tanggal, fmt.Sprintf("PJ-%d", penjualanID), "Penjualan", 1)
 	if err != nil {
 		return err
 	}
 	jurnalID, _ := res.LastInsertId()
 
-	// Ambil akun_id
-	var akunKas, akunPenjualan, akunPersediaan, akunHPP int
+	det := `INSERT INTO jurnal_detail (jurnal_id, akun_id, debit, kredit, keterangan) VALUES (?,?,?,?,?)`
+	// Debit kas
+	tx.Exec(det, jurnalID, debitAkun, kasMasuk, 0, "Penjualan "+pay)
+	// Kredit penjualan
+	tx.Exec(det, jurnalID, akunPenj, 0, trx.Subtotal, "Penjualan tunai")
+	// Debit HPP
+	tx.Exec(det, jurnalID, akunHPP, totalHPP, 0, "HPP FIFO")
+	// Kredit persediaan
+	tx.Exec(det, jurnalID, akunPers, 0, totalHPP, "Persediaan - FIFO")
 
-	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun = ?`, KODE_KAS).Scan(&akunKas); err != nil {
-		return fmt.Errorf("akun '1-101' (Kas) tidak ditemukan: %v", err)
-	}
-
-	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun = ?`, KODE_PENJUALAN).Scan(&akunPenjualan); err != nil {
-		return fmt.Errorf("akun 'Penjualan Produk' tidak ditemukan: %v", err)
-	}
-
-	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun = ?`, KODE_PERSEDIAAN).Scan(&akunPersediaan); err != nil {
-		return fmt.Errorf("akun 'Persediaan' tidak ditemukan: %v", err)
-	}
-
-	if err := tx.QueryRow(`SELECT akun_id FROM akun WHERE kode_akun = ?`, KODE_HPP).Scan(&akunHPP); err != nil {
-		return fmt.Errorf("akun 'Harga Pokok Penjualan' tidak ditemukan: %v", err)
-	}
-
-	// Entri jurnal: Penjualan & HPP
-	jurnalDetailQuery := `INSERT INTO jurnal_detail (jurnal_id, akun_id, debit, kredit, keterangan) VALUES (?, ?, ?, ?, ?)`
-
-	// Kas (Dr)
-	tx.Exec(jurnalDetailQuery, jurnalID, akunKas, trx.Subtotal, 0, "Penjualan tunai")
-	// Penjualan (Cr)
-	tx.Exec(jurnalDetailQuery, jurnalID, akunPenjualan, 0, trx.Subtotal, "Penjualan tunai")
-	// HPP (Dr)
-	tx.Exec(jurnalDetailQuery, jurnalID, akunHPP, totalHPP, 0, "Pengeluaran barang")
-	// Persediaan (Cr)
-	tx.Exec(jurnalDetailQuery, jurnalID, akunPersediaan, 0, totalHPP, "Pengeluaran barang")
-
-	// return tx.Commit()
-	// ✅ Commit transaksi
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaksi gagal: %v", err)
-	}
-
-	log.Println("🎉 Transaksi berhasil disimpan dan dicatat di jurnal.")
 	return nil
+}
+
+func nullIfEmpty(s string) interface{} {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return s
 }
 
 func min(a, b int) int {
@@ -209,4 +287,63 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func findBarangID(tx *sql.Tx, name string, price float64) (int, *barangCandidate, error) {
+	// 1) exact case-insensitive
+	var id int
+	err := tx.QueryRow(`SELECT barang_id FROM barang WHERE is_active=1 AND LOWER(nama_barang)=LOWER(?) LIMIT 1`, name).Scan(&id)
+	if err == nil {
+		return id, &barangCandidate{ID: id, Nama: name, Score: 1.0}, nil
+	}
+
+	// 2) LIKE
+	err = tx.QueryRow(`SELECT barang_id FROM barang WHERE is_active=1 AND nama_barang LIKE ? LIMIT 1`, "%"+name+"%").Scan(&id)
+	if err == nil {
+		return id, &barangCandidate{ID: id, Nama: name, Score: 0.95}, nil
+	}
+
+	// 3) Kandidat berdasar harga ~ mirip (±2.000 rupiah atau ±8%, mana yang lebih besar)
+	rounded := int64(math.Round(price))
+	tolAbs := int64(2000)
+	tolPct := int64(math.Round(float64(rounded) * 0.08))
+	tol := tolAbs
+	if tolPct > tolAbs {
+		tol = tolPct
+	}
+
+	rows, err := tx.Query(`
+        SELECT barang_id, nama_barang, CAST(harga_jual AS SIGNED)
+        FROM barang
+        WHERE is_active=1 AND ABS(CAST(harga_jual AS SIGNED) - ?) <= ?
+        LIMIT 20
+    `, rounded, tol)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer rows.Close()
+
+	var best *barangCandidate
+	for rows.Next() {
+		var cand barangCandidate
+		if err := rows.Scan(&cand.ID, &cand.Nama, &cand.HargaJual); err != nil {
+			return 0, nil, err
+		}
+		cand.Score = simRatio(name, cand.Nama)
+		cand.PriceDiff = cand.HargaJual - rounded
+		if best == nil || cand.Score > best.Score || (cand.Score == best.Score && abs64(cand.PriceDiff) < abs64(best.PriceDiff)) {
+			tmp := cand
+			best = &tmp
+		}
+	}
+	if best != nil && best.Score >= 0.82 { // ambang kemiripan
+		return best.ID, best, nil
+	}
+	return 0, best, sql.ErrNoRows
+}
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

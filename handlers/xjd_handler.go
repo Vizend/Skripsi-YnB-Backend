@@ -1,10 +1,8 @@
 package handlers
 
 import (
-	// "fmt"
 	"fmt"
 	"time"
-	// "time"
 	"ynb-backend/models"
 	"ynb-backend/utils"
 
@@ -37,20 +35,16 @@ func UploadXJDHandler(c *fiber.Ctx) error {
 	for i, trx := range transaksiList {
 		fmt.Printf("Transaksi #%d: %s %s, %d item\n", i+1, trx.Tanggal, trx.Jam, len(trx.Items))
 
-		err := models.ProcessTransaksiFIFO(trx)
-		if err != nil {
-			fmt.Printf("Gagal proses transaksi %d: %v\n", i+1, err)
-			// return c.Status(500).SendString(fmt.Sprintf("Gagal memproses transaksi %d", i+1))
-			return c.Status(500).JSON(fiber.Map{
-				"error": "Gagal memproses transaksi 1",
+		if err := models.ProcessTransaksiFIFO(trx); err != nil {
+			// Kembalikan pesan error + nomor transaksi yang gagal
+			return c.Status(400).JSON(fiber.Map{
+				"error": fmt.Sprintf("Transaksi #%d gagal: %v", i+1, err),
 			})
 		}
 
 		// Tambahan: beri waktu untuk driver SQL
 		time.Sleep(10 * time.Millisecond)
 	}
-
-
 	return c.JSON(fiber.Map{
 		"message": "Transaksi berhasil diproses",
 	})

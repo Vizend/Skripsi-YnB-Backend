@@ -2,7 +2,8 @@ package controllers
 
 import (
 	"database/sql"
-	// "fmt"
+	"encoding/csv"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -178,7 +179,9 @@ func GetBarang(c *fiber.Ctx) error {
 	includeArchived := c.Query("include_archived") == "1"
 	base := `
 		SELECT 
-			b.kode_barang, b.nama_barang, b.harga_jual, b.harga_beli,
+			b.kode_barang, b.nama_barang,
+			IFNULL(b.harga_jual, 0) AS harga_jual,
+			IFNULL(b.harga_beli, 0) AS harga_beli,
 			IFNULL(SUM(bm.sisa_stok), 0) AS total_stock
     	FROM barang b
     	LEFT JOIN barang_masuk bm ON b.barang_id = bm.barang_id
@@ -526,7 +529,7 @@ func UpdateBarangMasuk(c *fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"message": "Gagal apply stok_riwayat (periode baru)", "detail": err.Error()})
 		}
 	}
-	
+
 	// Upsert jurnal pembelian untuk batch ini sesuai nilai baru
 	mid, _ := strconv.Atoi(id)
 	if err := models.UpsertJurnalPembelianForMasuk(tx, mid, newTanggal, newNilai, ""); err != nil {
@@ -539,3 +542,119 @@ func UpdateBarangMasuk(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"message": "Berhasil update barang masuk"})
 }
 
+func ExportBarangCSV(c *fiber.Ctx) error {
+	var req struct {
+		Columns         []string `json:"columns"`
+		IncludeArchived bool     `json:"include_archived"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"message": "Payload tidak valid"})
+	}
+	if len(req.Columns) == 0 {
+		return c.Status(400).JSON(fiber.Map{"message": "Pilih minimal satu kolom"})
+	}
+
+	// Normalisasi & validasi kolom
+	allowed := map[string]bool{
+		"kode_barang": true,
+		"nama_barang": true,
+		"harga_jual":  true,
+		"harga_beli":  true,
+		"quantity":    true, // total stok = SUM(sisa_stok)
+		"value":       true, // nilai persediaan = SUM(sisa_stok * harga_beli)
+	}
+	cols := make([]string, 0, len(req.Columns))
+	for _, k := range req.Columns {
+		k = strings.TrimSpace(strings.ToLower(k))
+		if allowed[k] {
+			cols = append(cols, k)
+		}
+	}
+	if len(cols) == 0 {
+		return c.Status(400).JSON(fiber.Map{"message": "Kolom tidak valid"})
+	}
+
+	// Ambil semua field yang dibutuhkan
+	where := "WHERE b.is_active = 1"
+	if req.IncludeArchived {
+		where = ""
+	}
+	q := `
+        SELECT 
+            b.kode_barang,
+            b.nama_barang,
+            IFNULL(b.harga_jual,0) AS harga_jual,
+            IFNULL(b.harga_beli,0) AS harga_beli,
+            IFNULL(SUM(bm.sisa_stok),0) AS quantity,
+            IFNULL(SUM(bm.sisa_stok * bm.harga_beli),0) AS value
+        FROM barang b
+        LEFT JOIN barang_masuk bm ON b.barang_id = bm.barang_id
+        ` + where + `
+        GROUP BY b.barang_id
+        ORDER BY b.nama_barang ASC
+    `
+	rows, err := config.DB.Query(q)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"message": "Gagal query data"})
+	}
+	defer rows.Close()
+
+	type R struct {
+		Kode, Nama string
+		Jual, Beli float64
+		Qty        int
+		Val        float64
+	}
+	data := []R{}
+	for rows.Next() {
+		var r R
+		if err := rows.Scan(&r.Kode, &r.Nama, &r.Jual, &r.Beli, &r.Qty, &r.Val); err == nil {
+			data = append(data, r)
+		}
+	}
+
+	// Siapkan response CSV
+	ts := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("barang_%s.csv", ts)
+
+	c.Type("csv")          // => csv
+	c.Attachment(filename) // set Content-Disposition attachment
+
+	// Tulis CSV
+	w := csv.NewWriter(c.Context().Response.BodyWriter())
+	// header
+	if err := w.Write(cols); err != nil {
+		return c.Status(500).JSON(fiber.Map{"message": "Gagal tulis CSV (header)"})
+	}
+
+	// rows
+	for _, r := range data {
+		row := make([]string, 0, len(cols))
+		for _, k := range cols {
+			switch k {
+			case "kode_barang":
+				row = append(row, r.Kode)
+			case "nama_barang":
+				row = append(row, r.Nama)
+			case "harga_jual":
+				row = append(row, strconv.FormatFloat(r.Jual, 'f', -1, 64))
+			case "harga_beli":
+				row = append(row, strconv.FormatFloat(r.Beli, 'f', -1, 64))
+			case "quantity":
+				row = append(row, strconv.Itoa(r.Qty))
+			case "value":
+				row = append(row, strconv.FormatFloat(r.Val, 'f', -1, 64))
+			}
+		}
+		if err := w.Write(row); err != nil {
+			return c.Status(500).JSON(fiber.Map{"message": "Gagal tulis CSV (baris)"})
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return c.Status(500).JSON(fiber.Map{"message": "Gagal finalisasi CSV"})
+	}
+
+	// Fiber sudah menulis body CSV
+	return nil
+}

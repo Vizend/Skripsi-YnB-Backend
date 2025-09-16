@@ -41,7 +41,9 @@ func CreatePembelianManual(c *fiber.Ctx) error {
 
 	if err != nil {
 		// jika barang tidak ditemukan maka akan buat barang baru
-		createRes, err := tx.Exec(`INSERT into barang (kode_barang, nama_barang, harga_beli) VALUES (?, ?, ?)`, input.KodeBarang, input.NamaBarang, input.HargaSatuan)
+		createRes, err := tx.Exec(`INSERT into barang (kode_barang, nama_barang, harga_beli, jumlah_stock) 
+									VALUES (?, ?, ?, ?)`,
+			input.KodeBarang, input.NamaBarang, input.HargaSatuan, input.Jumlah)
 		if err != nil {
 			tx.Rollback()
 			return c.Status(500).JSON(fiber.Map{"error": "Gagal insert barang", "detail": err.Error()})
