@@ -586,7 +586,7 @@ func ExportBarangCSV(c *fiber.Ctx) error {
             IFNULL(b.harga_jual,0) AS harga_jual,
             IFNULL(b.harga_beli,0) AS harga_beli,
             IFNULL(SUM(bm.sisa_stok),0) AS quantity,
-            IFNULL(SUM(bm.sisa_stok * bm.harga_beli),0) AS value
+            IFNULL(SUM(bm.sisa_stok * b.harga_jual),0) AS value
         FROM barang b
         LEFT JOIN barang_masuk bm ON b.barang_id = bm.barang_id
         ` + where + `

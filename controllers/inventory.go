@@ -3,11 +3,13 @@ package controllers
 import (
 	"database/sql"
 	"fmt"
-	"github.com/gofiber/fiber/v2"
+	"math"
 	"strings"
 	"time"
 	"ynb-backend/config"
 	"ynb-backend/models"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 func UploadBarangCSV(c *fiber.Ctx) error {
@@ -52,6 +54,10 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 	now := time.Now()
 
 	for _, item := range items {
+
+		// harga_beli = 90% harga_jual
+		hb := math.Round(item.HargaJual * 0.9)
+
 		var existingID int
 		var isActive int
 		err := tx.QueryRow("SELECT barang_id, is_active FROM barang WHERE kode_barang = ?", item.KodeBarang).
@@ -63,7 +69,7 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 			resB, err := tx.Exec(`
 				INSERT INTO barang (kode_barang, nama_barang, harga_jual, harga_beli, jumlah_stock)
 				VALUES (?, ?, ?, ?, ?)`,
-				item.KodeBarang, item.NamaBarang, item.HargaJual, item.HargaBeli, item.JumlahStock,
+				item.KodeBarang, item.NamaBarang, item.HargaJual, hb, item.JumlahStock,
 			)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"message": "Gagal insert barang"})
@@ -73,7 +79,7 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 			resBM, err := tx.Exec(`
 				INSERT INTO barang_masuk (barang_id, tanggal, jumlah, harga_beli, sisa_stok, keterangan)
 				VALUES (?,?,?,?,?,?)`,
-				lastID, now, item.JumlahStock, item.HargaBeli, item.JumlahStock, "Upload CSV Baru",
+				lastID, now, item.JumlahStock, hb, item.JumlahStock, "Upload CSV Baru",
 			)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"message": "Gagal insert barang_masuk"})
@@ -82,7 +88,8 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 
 			// insert ke stok_riwayat
 			qty := float64(item.JumlahStock)
-			nilai := qty * item.HargaBeli // jika harga_beli 0 → hanya qty yang ter-rekap
+			nilai := qty * hb 
+
 			if mode == "opening" {
 				if err := models.UpsertOpeningBalance(tx, int(lastID), now, nilai, qty); err != nil {
 					return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok_riwayat (opening)"})
@@ -110,9 +117,9 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 				}
 			}
 
-			// Barang sudah ada
-			if _, err := tx.Exec(`UPDATE barang SET jumlah_stock = jumlah_stock + ? WHERE barang_id = ?`,
-				item.JumlahStock, existingID,
+			//update stok + sync harga jual/beli terbaru
+			if _, err := tx.Exec(`UPDATE barang SET jumlah_stock = jumlah_stock + ?, harga_jual=?, harga_beli=? WHERE barang_id = ?`,
++       item.JumlahStock, item.HargaJual, hb, existingID,
 			); err != nil {
 				return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok barang"})
 			}
@@ -120,7 +127,7 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 			resBM, err := tx.Exec(`
 				INSERT INTO barang_masuk (barang_id, tanggal, jumlah, harga_beli, sisa_stok, keterangan)
 				VALUES (?,?,?,?,?,?)`,
-				existingID, now, item.JumlahStock, item.HargaBeli, item.JumlahStock, "Upload CSV Tambahan",
+				existingID, now, item.JumlahStock, hb, item.JumlahStock, "Upload CSV Tambahan",
 			)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"message": "Gagal insert barang_masuk"})
@@ -129,7 +136,7 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 
 			// insert ke stok_riwayat
 			qty := float64(item.JumlahStock)
-			nilai := qty * item.HargaBeli
+			nilai := qty * hb
 			if mode == "opening" {
 				if err := models.UpsertOpeningBalance(tx, existingID, now, nilai, qty); err != nil {
 					return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok_riwayat (opening)"})

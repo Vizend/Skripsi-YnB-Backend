@@ -67,12 +67,6 @@ func GetJurnalList() ([]Jurnal, error) {
 			j.Tanggal = rawDate
 		}
 
-		// if rawTime.Valid {
-		// 	j.Tanggal = fmt.Sprintf("%sT%s:00Z", rawDate, rawTime.String)
-		// } else {
-		// 	j.Tanggal = rawDate
-		// }
-
 		// Ambil detail untuk jurnal ini
 		detailRows, err := DB.Query(`
 			SELECT jd.akun_id, a.nama_akun, jd.debit, jd.kredit, jd.keterangan

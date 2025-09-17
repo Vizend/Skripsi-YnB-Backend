@@ -72,6 +72,14 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/api/akuntansi/years", handlers.GetAvailableYears)
 	app.Get("/api/akuntansi/months", handlers.GetAvailableMonths)
 
+	//export excel
+	app.Get("/api/akuntansi/trial-balance.xlsx", handlers.ExportTrialBalanceXLSX)
+	app.Get("/api/akuntansi/income-statement.xlsx", handlers.ExportIncomeStatementXLSX)
+	app.Get("/api/akuntansi/balance-sheet.xlsx", handlers.ExportBalanceSheetXLSX)
+	app.Get("/api/akuntansi/journal-entries.xlsx", handlers.ExportJournalEntriesXLSX)
+	app.Get("/api/akuntansi/cogs.xlsx", handlers.ExportCOGSXLSX)
+	app.Get("/api/akuntansi/inventory-calculation.xlsx", handlers.ExportInventoryCalculationXLSX)
+
 	//pembelian
 	app.Post("/api/pembelian/manual", handlers.CreatePembelianManual)
 
