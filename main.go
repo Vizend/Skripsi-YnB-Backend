@@ -26,7 +26,7 @@ func main() {
 
 	// Tambahkan ini agar bisa digunakan dari frontend
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: "http://localhost:5173, http://157.15.124.37", //frontend
+		AllowOrigins: "https://ynbfrozenfood.my.id, http://localhost:5173, http://157.15.124.37", //frontend
 		// AllowOrigins:     "*", // izinkan semua
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Filename",
 		ExposeHeaders:    "Content-Disposition", // berguna untuk download CSV
