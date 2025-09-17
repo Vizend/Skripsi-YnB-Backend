@@ -42,26 +42,30 @@ type attemptRow struct {
 	LockedUntil sql.NullTime
 }
 
+var tz = time.UTC
+
 func getAttempt(db *sql.DB, key string) (*attemptRow, error) {
 	row := db.QueryRow("SELECT failed_count, window_start, locked_until FROM login_attempts WHERE key_name=?", key)
 	var r attemptRow
-	err := row.Scan(&r.FailedCount, &r.WindowStart, &r.LockedUntil)
-	if errors.Is(err, sql.ErrNoRows) {
-		//buat baris awal
-		_, _ = db.Exec("INSERT INTO login_attempts (key_name, failed_count, window_start) VALUES (?, 0, NOW())", key)
-		//ambil lagi
-		row2 := db.QueryRow("SELECT failed_count, window_start, locked_until FROM login_attempts WHERE key_name=?", key)
+	if err := row.Scan(&r.FailedCount, &r.WindowStart, &r.LockedUntil); errors.Is(err, sql.ErrNoRows) {
+		now := time.Now().In(tz)
+		_, _ = db.Exec(`INSERT INTO login_attempts 
+						(key_name, failed_count, window_start, last_failed_at, locked_until)
+                        VALUES (?, 0, ?, ?, NULL)`, key, now, now)
+		// ambil ulang
+		row2 := db.QueryRow(`SELECT failed_count, window_start, locked_until 
+							FROM login_attempts WHERE key_name=?`, key)
 		err2 := row2.Scan(&r.FailedCount, &r.WindowStart, &r.LockedUntil)
 		return &r, err2
 	}
-	return &r, err
+	return &r, nil
 }
 
 func isLocked(r *attemptRow) (bool, time.Duration) {
 	if r.LockedUntil.Valid {
-		until := r.LockedUntil.Time
-		if time.Now().Before(until) {
-			return true, time.Until(until)
+		now := time.Now().In(tz)
+		if now.Before(r.LockedUntil.Time) {
+			return true, r.LockedUntil.Time.Sub(now)
 		}
 	}
 	return false, 0
@@ -72,7 +76,7 @@ func bumpFailure(db *sql.DB, key string) (*attemptRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
+	now := time.Now().In(tz)
 
 	// reset window kalau sudah lewat
 	if now.Sub(r.WindowStart) > loginWindow {
@@ -81,27 +85,24 @@ func bumpFailure(db *sql.DB, key string) (*attemptRow, error) {
 	}
 
 	r.FailedCount++
-	lockedUntil := sql.NullTime{}
 
-	// lock kalau melewati ambang
+	lu := sql.NullTime{}
 	if r.FailedCount >= maxAttemptsWindow {
-		lockedUntil = sql.NullTime{Time: now.Add(lockDurationShort), Valid: true}
+		lu = sql.NullTime{Time: now.Add(lockDurationShort), Valid: true}
 	}
 
 	_, err = db.Exec(`
 		UPDATE login_attempts
-		SET failed_count=?, window_start=?, last_failed_at=NOW(), locked_until=IF(?=1, ?, NULLIF(locked_until, locked_until))
+		SET failed_count=?, window_start=?, last_failed_at=?, locked_until=?
 		WHERE key_name=?`,
-		r.FailedCount, r.WindowStart, // count & window
-		boolToInt(lockedUntil.Valid), lockedUntil.Time, // lock
-		key,
+		r.FailedCount, r.WindowStart, now, lu, key,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	// refresh state yang kita pegang
-	r.LockedUntil = lockedUntil
+	r.LockedUntil = lu
 	return r, nil
 }
 
