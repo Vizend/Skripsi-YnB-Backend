@@ -12,7 +12,7 @@ import (
 type ExpenseInput struct {
 	Tanggal    string  `json:"tanggal"`              // "YYYY-MM-DD"
 	Kategori   string  `json:"kategori"`             // "gaji" | "listrik" | "transport"
-	Metode     string  `json:"metode"`               // "kas" | "bank" | "utang"
+	Metode     string  `json:"metode"`               // "kas" | "bank" 
 	Jumlah     float64 `json:"jumlah"`               // nominal
 	Keterangan string  `json:"keterangan,omitempty"` // optional
 	UserID     *int    `json:"user_id,omitempty"`    // optional
@@ -70,7 +70,7 @@ func CreateExpense(c *fiber.Ctx) error {
 	creditMap := map[string]string{
 		"kas":   "1-101", // Kas
 		"bank":  "1-102", // Bank
-		"utang": "2-101", // Utang Usaha (jika dicatat akrual)
+		// "utang": "2-101", // Utang Usaha (jika dicatat akrual)
 	}
 	debitKode, ok := debitMap[in.Kategori]
 	if !ok {
@@ -78,7 +78,7 @@ func CreateExpense(c *fiber.Ctx) error {
 	}
 	creditKode, ok := creditMap[in.Metode]
 	if !ok {
-		return c.Status(400).JSON(fiber.Map{"message": "metode harus salah satu dari: kas|bank|utang"})
+		return c.Status(400).JSON(fiber.Map{"message": "metode harus salah satu dari: kas|bank"})
 	}
 
 	tx, err := config.DB.Begin()
@@ -139,7 +139,7 @@ func CreateExpense(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"message": "Gagal insert jurnal_detail debit"})
 	}
 
-	// detail kredit (kas/bank/utang)
+	// detail kredit (kas/bank)
 	if _, err := tx.Exec(`
 		INSERT INTO jurnal_detail (jurnal_id, akun_id, debit, kredit, keterangan)
 		VALUES (?, ?, 0, ?, ?)`,

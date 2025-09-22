@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"fmt"
+	"math"
 	"time"
+
 	// "ynb-backend/controllers"
 	"ynb-backend/models"
 
@@ -39,11 +41,15 @@ func CreatePembelianManual(c *fiber.Ctx) error {
 	var isActive int
 	err = tx.QueryRow(`SELECT barang_id, is_active FROM barang WHERE kode_barang = ?`, input.KodeBarang).Scan(&barangID, &isActive)
 
+	// menghitung harga jual = harga beli + 10% harga beli
+
+	hj := math.Round(input.HargaSatuan * 1.1)
+
 	if err != nil {
 		// jika barang tidak ditemukan maka akan buat barang baru
-		createRes, err := tx.Exec(`INSERT into barang (kode_barang, nama_barang, harga_beli, jumlah_stock) 
-									VALUES (?, ?, ?, ?)`,
-			input.KodeBarang, input.NamaBarang, input.HargaSatuan, input.Jumlah)
+		createRes, err := tx.Exec(`INSERT into barang (kode_barang, nama_barang, harga_beli, harga_jual, jumlah_stock) 
+									VALUES (?, ?, ?, ?, ?)`,
+			input.KodeBarang, input.NamaBarang, input.HargaSatuan, hj, input.Jumlah)
 		if err != nil {
 			tx.Rollback()
 			return c.Status(500).JSON(fiber.Map{"error": "Gagal insert barang", "detail": err.Error()})

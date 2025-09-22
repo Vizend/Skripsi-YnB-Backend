@@ -45,7 +45,7 @@ func CreateJurnalPembelian(tx *sql.Tx, t time.Time, total float64, ref, kreditKo
 	); err != nil {
 		return err
 	}
-	// Cr Kas / Utang
+	// Cr Kas 
 	if _, err := tx.Exec(
 		`INSERT INTO jurnal_detail (jurnal_id, akun_id, debit, kredit, keterangan)
 		VALUES (?,?,?,?,?)`,
@@ -99,7 +99,7 @@ func UpsertJurnalPembelianForMasuk(tx *sql.Tx, masukID int, t time.Time, total f
 		); err != nil {
 			return err
 		}
-		// Cr Kas/Utang
+		// Cr Kas
 		if _, err := tx.Exec(
 			`INSERT INTO jurnal_detail (jurnal_id, akun_id, debit, kredit, keterangan)
 			VALUES (?,?,?,?,?)`,

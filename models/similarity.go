@@ -4,12 +4,14 @@ import (
 	"strings"
 )
 
-// Levenshtein distance 
+// Levenshtein distance
 func levenshtein(a, b string) int {
 	ra := []rune(strings.ToLower(strings.TrimSpace(a)))
 	rb := []rune(strings.ToLower(strings.TrimSpace(b)))
-	da := make([]int, len(rb)+1)
-	db := make([]int, len(rb)+1)
+	
+	da := make([]int, len(rb)+1) // row sebelumnya (D[i-1][*])
+	db := make([]int, len(rb)+1) // row sekarang (D[i][*])
+
 	for j := 0; j <= len(rb); j++ {
 		da[j] = j
 	}
@@ -20,7 +22,11 @@ func levenshtein(a, b string) int {
 			if ra[i-1] != rb[j-1] {
 				cost = 1
 			}
-			db[j] = min3(db[j-1]+1, da[j]+1, da[j-1]+cost)
+			db[j] = min3(
+				db[j-1]+1, // insert: dari kiri (D[i][j-1]) + 1
+				da[j]+1, // delete: dari atas (D[i-1][j]) + 1
+				da[j-1]+cost, // replace: dari diagonal (D[i-1][j-1]) + cost
+			)
 		}
 		copy(da, db)
 	}

@@ -103,8 +103,15 @@ func ProcessTransaksiFIFOWithOpts(trx utils.Transaksi, opts ProcessOpts) (retErr
 	var totalHPP float64
 
 	for _, it := range trx.Items {
+
+		// --- SEBELUM cari barang, tentukan harga_satuan yang benar ---
+		unit := it.Harga
+		if it.Jumlah > 1 {
+			unit = it.Harga / float64(it.Jumlah) // TXT pakai total baris
+		}
+
 		// --- cari barang ---
-		barangID, _, err := findBarangID(tx, it.Nama, it.Harga)
+		barangID, _, err := findBarangID(tx, it.Nama, unit)
 		if err != nil {
 			// barang tidak ketemu => untuk DryRun: cukup warning, untuk commit: gagal atau lewati?
 			if opts.DryRun {
@@ -117,7 +124,7 @@ func ProcessTransaksiFIFOWithOpts(trx utils.Transaksi, opts ProcessOpts) (retErr
 		}
 
 		// sinkron harga_jual → set ke harga terbaru dari TXT
-		rounded := int64(math.Round(it.Harga))
+		rounded := int64(math.Round(unit))
 		var current sql.NullInt64
 		if err := tx.QueryRow(`SELECT CAST(harga_jual AS SIGNED) FROM barang WHERE barang_id = ?`, barangID).Scan(&current); err != nil {
 			return fmt.Errorf("read harga_jual: %v", err)
@@ -136,7 +143,7 @@ func ProcessTransaksiFIFOWithOpts(trx utils.Transaksi, opts ProcessOpts) (retErr
 		// detail_penjualan
 		if _, err := tx.Exec(`INSERT INTO detail_penjualan (penjualan_id, barang_id, jumlah, harga_satuan, total)
                             	VALUES (?,?,?,?,?)`,
-			penjualanID, barangID, it.Jumlah, it.Harga, it.Harga*float64(it.Jumlah)); err != nil {
+			penjualanID, barangID, it.Jumlah, unit, unit*float64(it.Jumlah)); err != nil {
 			return fmt.Errorf("insert detail_penjualan: %v", err)
 		}
 
@@ -336,7 +343,7 @@ func findBarangID(tx *sql.Tx, name string, price float64) (int, *barangCandidate
 			best = &tmp
 		}
 	}
-	if best != nil && best.Score >= 0.82 { // ambang kemiripan
+	if best != nil && best.Score >= 0.70 { // ambang kemiripan
 		return best.ID, best, nil
 	}
 	return 0, best, sql.ErrNoRows

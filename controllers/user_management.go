@@ -3,6 +3,8 @@ package controllers
 import (
 	"database/sql"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 	"ynb-backend/config"
 	"ynb-backend/models"
@@ -15,6 +17,21 @@ func CreateUser(c *fiber.Ctx) error {
 	var user models.User
 	if err := c.BodyParser(&user); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid input"})
+	}
+
+	user.Username = strings.TrimSpace(user.Username)
+	user.Email = strings.TrimSpace(user.Email)
+	user.FullName = strings.TrimSpace(user.FullName)
+	user.Phone = strings.TrimSpace(user.Phone)
+	user.Address = strings.TrimSpace(user.Address)
+
+	// Validasi wajib field
+	if user.Username == "" || user.Email == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Username & Email wajib diisi"})
+	}
+
+	if user.TanggalLahir == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Tanggal lahir dibutuhkan untuk generate password"})
 	}
 
 	// Password default dari tanggal lahir: DDMMYYYY
@@ -41,6 +58,29 @@ func CreateUser(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "DB error"})
 	}
 
+	defer func() {
+		_ = tx.Rollback() // aman; kalau sudah Commit
+	}()
+
+	// === CEK DUPLIKAT ===
+	dupU, dupE, err := checkDupUser(tx, user.Username, user.Email, nil)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "DB error saat cek duplikat"})
+	}
+	if dupU || dupE {
+		fields := fiber.Map{}
+		if dupU {
+			fields["username"] = "Username sudah digunakan"
+		}
+		if dupE {
+			fields["email"] = "Email sudah digunakan"
+		}
+		return c.Status(409).JSON(fiber.Map{
+			"error":  "Duplicate fields",
+			"fields": fields,
+		})
+	}
+
 	// Insert user
 	res, err := tx.Exec(`
 		INSERT INTO user (username, password, email, nama_lengkap, no_telp, alamat, tanggal_lahir)
@@ -48,24 +88,27 @@ func CreateUser(c *fiber.Ctx) error {
 		user.Username, string(hashed), user.Email, user.FullName, user.Phone, user.Address, user.TanggalLahir,
 	)
 	if err != nil {
-		tx.Rollback()
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save user"})
+		// tx.Rollback()
+		// return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save user"})
+		return c.Status(409).JSON(fiber.Map{"error": "Username/Email sudah digunakan"})
 	}
 
 	userID, err := res.LastInsertId()
 	if err != nil {
-		tx.Rollback()
+		// tx.Rollback()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve user ID"})
 	}
 
 	// Assign role
 	_, err = tx.Exec(`INSERT INTO user_role (user_id, role_id) VALUES (?, ?)`, userID, user.RoleID)
 	if err != nil {
-		tx.Rollback()
+		// tx.Rollback()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to assign role"})
 	}
 
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "DB commit error"})
+	}
 
 	return c.JSON(fiber.Map{"message": "User created with default password from birthdate"})
 }
@@ -78,10 +121,40 @@ func UpdateUser(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid input"})
 	}
 
+	user.Username = strings.TrimSpace(user.Username)
+	user.Email = strings.TrimSpace(user.Email)
+
 	db := config.DB
 	tx, err := db.Begin()
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to begin transaction"})
+	}
+
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	// excludeID untuk cek duplikat
+	var exID int64
+	if v, err := strconv.ParseInt(id, 10, 64); err == nil {
+		exID = v
+	}
+	dupU, dupE, err := checkDupUser(tx, user.Username, user.Email, &exID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "DB error saat cek duplikat"})
+	}
+	if dupU || dupE {
+		fields := fiber.Map{}
+		if dupU {
+			fields["username"] = "Username sudah digunakan"
+		}
+		if dupE {
+			fields["email"] = "Email sudah digunakan"
+		}
+		return c.Status(409).JSON(fiber.Map{
+			"error":  "Duplicate fields",
+			"fields": fields,
+		})
 	}
 
 	// Update data user
@@ -92,23 +165,25 @@ func UpdateUser(c *fiber.Ctx) error {
 		user.Username, user.Email, user.FullName, user.Phone, user.Address, user.TanggalLahir, id,
 	)
 	if err != nil {
-		tx.Rollback()
+		// tx.Rollback()
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to update user"})
 	}
 
 	// Update role (hapus lama → insert baru)
 	_, err = tx.Exec(`DELETE FROM user_role WHERE user_id = ?`, id)
 	if err != nil {
-		tx.Rollback()
+		// tx.Rollback()
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to clear old role"})
 	}
 	_, err = tx.Exec(`INSERT INTO user_role (user_id, role_id) VALUES (?, ?)`, id, user.RoleID)
 	if err != nil {
-		tx.Rollback()
+		// tx.Rollback()
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to update role"})
 	}
 
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "DB commit error"})
+	}
 	return c.JSON(fiber.Map{"message": "User updated successfully"})
 }
 
@@ -188,4 +263,62 @@ func GetAllRoles(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(roles)
+}
+
+func checkDupUser(tx *sql.Tx, username, email string, excludeID *int64) (dupU, dupE bool, err error) {
+	var cnt int
+
+	qU := "SELECT COUNT(*) FROM user WHERE username = ?"
+	argsU := []any{username}
+	qE := "SELECT COUNT(*) FROM user WHERE email = ?"
+	argsE := []any{email}
+
+	if excludeID != nil {
+		qU += " AND user_id <> ?"
+		argsU = append(argsU, *excludeID)
+		qE += " AND user_id <> ?"
+		argsE = append(argsE, *excludeID)
+	}
+
+	if err = tx.QueryRow(qU, argsU...).Scan(&cnt); err != nil {
+		return
+	}
+	dupU = cnt > 0
+
+	if err = tx.QueryRow(qE, argsE...).Scan(&cnt); err != nil {
+		return
+	}
+	dupE = cnt > 0
+	return
+}
+
+func CheckAvailability(c *fiber.Ctx) error {
+	username := strings.TrimSpace(c.Query("username"))
+	email := strings.TrimSpace(c.Query("email"))
+	exclude := c.Query("excludeId")
+
+	var exID *int64
+	if exclude != "" {
+		if v, err := strconv.ParseInt(exclude, 10, 64); err == nil {
+			exID = &v
+		}
+	}
+
+	db := config.DB
+	tx, err := db.Begin()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "DB error"})
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	dupU, dupE, err := checkDupUser(tx, username, email, exID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "DB error"})
+	}
+
+	_ = tx.Commit()
+	return c.JSON(fiber.Map{
+		"username_taken": dupU,
+		"email_taken":    dupE,
+	})
 }

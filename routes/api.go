@@ -32,6 +32,7 @@ func SetupRoutes(app *fiber.App) {
 	app.Put("/api/users/:id", controllers.UpdateUser)
 	app.Delete("/api/users/:id", controllers.DeleteUser)
 	app.Get("/api/roles", controllers.GetAllRoles)
+	app.Get("/api/users/check", controllers.CheckAvailability)
 
 	app.Put("/api/users/:id/profile", controllers.UpdateProfile)
 	app.Put("/api/users/:id/change-password", controllers.ChangePassword)

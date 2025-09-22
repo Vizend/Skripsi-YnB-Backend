@@ -3,6 +3,7 @@ package models
 import (
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 type JurnalDetail struct {
@@ -30,6 +31,26 @@ func ensureTimeFormat(timeStr string) string {
 	return timeStr
 }
 
+
+func makeTanggal(rawDate string, rawTime sql.NullString) string {
+
+    datePart := rawDate
+    if len(datePart) >= 10 {
+        datePart = rawDate[:10]
+    }
+
+
+    if rawTime.Valid && rawTime.String != "" {
+        loc, _ := time.LoadLocation("Asia/Jakarta")
+        ts := fmt.Sprintf("%s %s", datePart, ensureTimeFormat(rawTime.String))
+        if t, err := time.ParseInLocation("2006-01-02 15:04:05", ts, loc); err == nil {
+
+            return t.Format("2006-01-02")
+        }
+    }
+    return datePart 
+}
+
 func GetJurnalList() ([]Jurnal, error) {
 	rows, err := DB.Query(`SELECT j.jurnal_id, j.tanggal, j.referensi, j.tipe_jurnal, j.user_id, p.jam
 		FROM jurnal j
@@ -53,6 +74,7 @@ func GetJurnalList() ([]Jurnal, error) {
 		if err := rows.Scan(&j.JurnalID, &rawDate, &j.Referensi, &j.TipeJurnal, &j.UserID, &rawTime); err != nil {
 			return nil, err
 		}
+		j.Tanggal = makeTanggal(rawDate, rawTime)
 
 		// Format ISO 8601 hanya jika rawTime valid
 		if rawTime.Valid {
@@ -126,6 +148,7 @@ func GetJurnalListFiltered(year, month string) ([]Jurnal, error) {
 		if err := rows.Scan(&j.JurnalID, &rawDate, &j.Referensi, &j.TipeJurnal, &j.UserID, &rawTime); err != nil {
 			return nil, err
 		}
+		j.Tanggal = makeTanggal(rawDate, rawTime)
 
 		if rawTime.Valid {
 			// Ambil hanya bagian tanggal tanpa waktu jika rawDate sudah dalam format "2025-06-01T00:00:00Z"
