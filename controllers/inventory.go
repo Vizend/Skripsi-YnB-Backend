@@ -88,7 +88,7 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 
 			// insert ke stok_riwayat
 			qty := float64(item.JumlahStock)
-			nilai := qty * hb 
+			nilai := qty * hb
 
 			if mode == "opening" {
 				if err := models.UpsertOpeningBalance(tx, int(lastID), now, nilai, qty); err != nil {
@@ -117,45 +117,72 @@ func UploadBarangCSV(c *fiber.Ctx) error {
 				}
 			}
 
-			//update stok + sync harga jual/beli terbaru
-			if _, err := tx.Exec(`UPDATE barang SET jumlah_stock = jumlah_stock + ?, harga_jual=?, harga_beli=? WHERE barang_id = ?`,
-+       item.JumlahStock, item.HargaJual, hb, existingID,
-			); err != nil {
-				return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok barang"})
+			// Ambil stok saat ini
+			var currentStock int
+			if err := tx.QueryRow(`
+					SELECT COALESCE(SUM(sisa_stok), 0)
+					FROM barang_masuk
+					WHERE barang_id = ?`,
+				existingID,
+			).Scan(&currentStock); err != nil {
+				return c.Status(500).JSON(fiber.Map{"message": "Gagal baca sisa_stok eksisting"})
 			}
 
-			resBM, err := tx.Exec(`
-				INSERT INTO barang_masuk (barang_id, tanggal, jumlah, harga_beli, sisa_stok, keterangan)
-				VALUES (?,?,?,?,?,?)`,
-				existingID, now, item.JumlahStock, hb, item.JumlahStock, "Upload CSV Tambahan",
-			)
-			if err != nil {
-				return c.Status(500).JSON(fiber.Map{"message": "Gagal insert barang_masuk"})
-			}
-			mid, _ := resBM.LastInsertId()
+			// Bandingkan stok CSV vs DB
+			delta := item.JumlahStock - currentStock
 
-			// insert ke stok_riwayat
-			qty := float64(item.JumlahStock)
-			nilai := qty * hb
-			if mode == "opening" {
-				if err := models.UpsertOpeningBalance(tx, existingID, now, nilai, qty); err != nil {
-					return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok_riwayat (opening)"})
+			if delta > 0 {
+				// Tambah stok sebesar delta; sinkron harga saat ada penambahan
+				if _, err := tx.Exec(
+					`UPDATE barang 
+					SET jumlah_stock = ?, harga_jual = ?, harga_beli = ?
+					WHERE barang_id = ?`,
+					currentStock+delta, item.HargaJual, hb, existingID,
+				); err != nil {
+					return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok barang"})
 				}
+
+				resBM, err := tx.Exec(`
+					INSERT INTO barang_masuk (barang_id, tanggal, jumlah, harga_beli, sisa_stok, keterangan)
+					VALUES (?,?,?,?,?,?)`,
+					existingID, now, delta, hb, delta, "Rekonsiliasi CSV (tambah selisih)",
+				)
+				if err != nil {
+					return c.Status(500).JSON(fiber.Map{"message": "Gagal insert barang_masuk"})
+				}
+				mid, _ := resBM.LastInsertId()
+
+				qty := float64(delta)
+				nilai := qty * hb
+				if mode == "opening" {
+					if err := models.UpsertOpeningBalance(tx, existingID, now, nilai, qty); err != nil {
+						return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok_riwayat (opening)"})
+					}
+				} else {
+					if err := models.UpdateStokPembelian(tx, existingID, now, nilai, qty); err != nil {
+						return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok_riwayat (pembelian)"})
+					}
+					if err := models.UpsertJurnalPembelianForMasuk(tx, int(mid), now, nilai, ""); err != nil {
+						return c.Status(500).JSON(fiber.Map{
+							"message": "Gagal upsert jurnal pembelian",
+							"detail":  err.Error(),
+						})
+					}
+				}
+
+				hasil = append(hasil, map[string]string{
+					"kode_barang": item.KodeBarang,
+					"nama_barang": item.NamaBarang,
+					"status":      fmt.Sprintf("Tambah stok +%d (DB=%d → %d)", delta, currentStock, currentStock+delta),
+				})
 			} else {
-				if err := models.UpdateStokPembelian(tx, existingID, now, nilai, qty); err != nil {
-					return c.Status(500).JSON(fiber.Map{"message": "Gagal update stok_riwayat (pembelian)"})
-				}
-				// jurnal per batch (akan skip bila nilai==0)
-				if err := models.UpsertJurnalPembelianForMasuk(tx, int(mid), now, nilai, ""); err != nil {
-					return c.Status(500).JSON(fiber.Map{"message": "Gagal upsert jurnal pembelian", "detail": err.Error()})
-				}
+				// CSV sama atau lebih kecil → skip total (stok & harga tidak diubah)
+				hasil = append(hasil, map[string]string{
+					"kode_barang": item.KodeBarang,
+					"nama_barang": item.NamaBarang,
+					"status":      fmt.Sprintf("Lewati (DB=%d, CSV=%d)", currentStock, item.JumlahStock),
+				})
 			}
-
-			hasil = append(hasil, map[string]string{
-				"kode_barang": item.KodeBarang,
-				"nama_barang": item.NamaBarang,
-				"status":      "Stok barang ditambahkan",
-			})
 
 		default:
 			return c.Status(500).JSON(fiber.Map{

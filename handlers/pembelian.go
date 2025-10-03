@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"time"
@@ -126,6 +127,22 @@ func CreatePembelianManual(c *fiber.Ctx) error {
 		return err
 	}
 
+	saldoKas, err := getSaldoAkunUpTo(tx, akunKas, input.Tanggal)
+	if err != nil {
+		tx.Rollback()
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal cek saldo kas"})
+	}
+	if saldoKas < input.Total {
+		tx.Rollback()
+		return c.Status(400).JSON(fiber.Map{
+			"error":  "Saldo kas tidak mencukupi untuk pembelian.",
+			"saldo":  saldoKas,
+			"butuh":  input.Total,
+			"kurang": input.Total - saldoKas,
+			"saran":  "Tambah kas lewat transaksi Modal, atau gunakan metode Bank/Utang.",
+		})
+	}
+
 	// Tambahkan detail jurnal
 	_, err = tx.Exec(`
 		INSERT INTO jurnal_detail (jurnal_id, akun_id, debit, kredit, keterangan)
@@ -147,4 +164,15 @@ func CreatePembelianManual(c *fiber.Ctx) error {
 
 	tx.Commit()
 	return c.JSON(fiber.Map{"message": "Pembelian berhasil disimpan"})
+}
+
+func getSaldoAkunUpTo(tx *sql.Tx, akunID int, tanggal string) (float64, error) {
+	var saldo float64
+	err := tx.QueryRow(`
+		SELECT COALESCE(SUM(jd.debit - jd.kredit), 0)
+		FROM jurnal_detail jd
+		JOIN jurnal j ON j.jurnal_id = jd.jurnal_id
+		WHERE jd.akun_id = ? AND DATE(j.tanggal) <= DATE(?)
+	`, akunID, tanggal).Scan(&saldo)
+	return saldo, err
 }

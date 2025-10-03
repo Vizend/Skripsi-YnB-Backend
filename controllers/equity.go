@@ -102,6 +102,23 @@ func CreateEquity(c *fiber.Ctx) error {
 		userID = *in.UserID
 	}
 
+	if in.Tipe == "prive" {
+		saldo, err := getSaldoAkunUpTo(tx, assetID, in.Tanggal)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"message": "Gagal cek saldo kas/bank"})
+		}
+		if saldo < in.Jumlah {
+			return c.Status(400).JSON(fiber.Map{
+				"message": "Saldo kas/bank tidak cukup untuk PRIVE.",
+				"akun":    in.Metode,
+				"saldo":   saldo,
+				"butuh":   in.Jumlah,
+				"kurang":  in.Jumlah - saldo,
+				"saran":   "Kurangi nominal atau tambah modal terlebih dahulu.",
+			})
+		}
+	}
+
 	// header jurnal
 	ref := fmt.Sprintf("%s-%s", map[string]string{"modal": "MDL", "prive": "PRV"}[in.Tipe], time.Now().Format("060102150405"))
 	res, err := tx.Exec(`INSERT INTO jurnal (tanggal, referensi, tipe_jurnal, user_id) VALUES (?, ?, ?, ?)`,

@@ -129,10 +129,16 @@ func ProcessTransaksiFIFOWithOpts(trx utils.Transaksi, opts ProcessOpts) (retErr
 		if err := tx.QueryRow(`SELECT CAST(harga_jual AS SIGNED) FROM barang WHERE barang_id = ?`, barangID).Scan(&current); err != nil {
 			return fmt.Errorf("read harga_jual: %v", err)
 		}
-		if !current.Valid || current.Int64 != rounded {
-			if _, err := tx.Exec(`UPDATE barang SET harga_jual = ? WHERE barang_id = ?`, rounded, barangID); err != nil {
-				return fmt.Errorf("update harga_jual: %v", err)
-			}
+
+		priceDiff := abs64(current.Int64 - rounded)
+		tolAbs := int64(2000)
+		tolPct := int64(math.Round(float64(rounded) * 0.05))
+		tol := tolAbs
+		if tolPct > tol {
+			tol = tolPct
+		}
+		if priceDiff <= tol {
+			_, _ = tx.Exec(`UPDATE barang SET harga_jual = ? WHERE barang_id = ?`, rounded, barangID)
 		}
 
 		if opts.DryRun {
@@ -273,7 +279,7 @@ func ProcessTransaksiFIFOWithOpts(trx utils.Transaksi, opts ProcessOpts) (retErr
 	// Debit kas
 	tx.Exec(det, jurnalID, debitAkun, kasMasuk, 0, "Penjualan "+pay)
 	// Kredit penjualan
-	tx.Exec(det, jurnalID, akunPenj, 0, trx.Subtotal, "Penjualan tunai")
+	tx.Exec(det, jurnalID, akunPenj, 0, trx.Subtotal, "Penjualan -"+pay)
 	// Debit HPP
 	tx.Exec(det, jurnalID, akunHPP, totalHPP, 0, "HPP FIFO")
 	// Kredit persediaan
@@ -296,57 +302,122 @@ func min(a, b int) int {
 	return b
 }
 
-func findBarangID(tx *sql.Tx, name string, price float64) (int, *barangCandidate, error) {
-	// 1) exact case-insensitive
-	var id int
-	err := tx.QueryRow(`SELECT barang_id FROM barang WHERE is_active=1 AND LOWER(nama_barang)=LOWER(?) LIMIT 1`, name).Scan(&id)
-	if err == nil {
-		return id, &barangCandidate{ID: id, Nama: name, Score: 1.0}, nil
-	}
+const (
+	tolAbsDefault    = int64(2000)
+	tolPctNearest    = 0.05 // dulu 0.08 -> diperkecil supaya 46.5k tidak nyangkut ke 50k
+	minSimPriceMatch = 0.50 // minimal similarity untuk exact/nearest price
+	minSimLike       = 0.60 // minimal similarity untuk fallback LIKE
+)
 
-	// 2) LIKE
-	err = tx.QueryRow(`SELECT barang_id FROM barang WHERE is_active=1 AND nama_barang LIKE ? LIMIT 1`, "%"+name+"%").Scan(&id)
-	if err == nil {
-		return id, &barangCandidate{ID: id, Nama: name, Score: 0.95}, nil
-	}
-
-	// 3) Kandidat berdasar harga ~ mirip (±2.000 rupiah atau ±8%, mana yang lebih besar)
+func findBarangID(tx *sql.Tx, rawName string, price float64) (int, *barangCandidate, error) {
+	name := strings.TrimSpace(rawName)
 	rounded := int64(math.Round(price))
-	tolAbs := int64(2000)
-	tolPct := int64(math.Round(float64(rounded) * 0.08))
-	tol := tolAbs
-	if tolPct > tolAbs {
-		tol = tolPct
+
+	// 1) Exact name (case-insensitive)
+	var exactID int
+	if err := tx.QueryRow(
+		`SELECT barang_id FROM barang WHERE is_active=1 AND LOWER(nama_barang)=LOWER(?) LIMIT 1`, name,
+	).Scan(&exactID); err == nil {
+		return exactID, &barangCandidate{ID: exactID, Nama: name, HargaJual: rounded, Score: 1.0, PriceDiff: 0}, nil
 	}
 
-	rows, err := tx.Query(`
-        SELECT barang_id, nama_barang, CAST(harga_jual AS SIGNED)
+	// helper untuk memilih kandidat terbaik dari hasil query
+	pickBest := func(rows *sql.Rows, preferByPrice bool) (*barangCandidate, error) {
+		defer rows.Close()
+		var best *barangCandidate
+		var bestAbsDiff int64 = 1 << 62
+		for rows.Next() {
+			var cand barangCandidate
+			if err := rows.Scan(&cand.ID, &cand.Nama, &cand.HargaJual); err != nil {
+				return nil, err
+			}
+			cand.PriceDiff = cand.HargaJual - rounded
+			cand.Score = simRatio(name, cand.Nama)
+			absd := abs64(cand.PriceDiff)
+
+			if best == nil {
+				tmp := cand
+				best = &tmp
+				bestAbsDiff = absd
+				continue
+			}
+			if preferByPrice {
+				// Utamakan harga lebih dekat; jika sama, utamakan kemiripan nama
+				if absd < bestAbsDiff || (absd == bestAbsDiff && cand.Score > best.Score) {
+					tmp := cand
+					best = &tmp
+					bestAbsDiff = absd
+				}
+			} else {
+				// Utamakan kemiripan nama; jika sama, harga lebih dekat
+				if cand.Score > best.Score || (cand.Score == best.Score && absd < bestAbsDiff) {
+					tmp := cand
+					best = &tmp
+					bestAbsDiff = absd
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return best, nil
+	}
+
+	// 2) Exact price terlebih dahulu
+	rows, err := tx.Query(
+		`SELECT barang_id, nama_barang, CAST(harga_jual AS SIGNED)
         FROM barang
-        WHERE is_active=1 AND ABS(CAST(harga_jual AS SIGNED) - ?) <= ?
-        LIMIT 20
-    `, rounded, tol)
+        WHERE is_active=1 AND CAST(harga_jual AS SIGNED) = ?
+        LIMIT 50`, rounded)
 	if err != nil {
 		return 0, nil, err
 	}
-	defer rows.Close()
-
-	var best *barangCandidate
-	for rows.Next() {
-		var cand barangCandidate
-		if err := rows.Scan(&cand.ID, &cand.Nama, &cand.HargaJual); err != nil {
-			return 0, nil, err
-		}
-		cand.Score = simRatio(name, cand.Nama)
-		cand.PriceDiff = cand.HargaJual - rounded
-		if best == nil || cand.Score > best.Score || (cand.Score == best.Score && abs64(cand.PriceDiff) < abs64(best.PriceDiff)) {
-			tmp := cand
-			best = &tmp
-		}
-	}
-	if best != nil && best.Score >= 0.70 { // ambang kemiripan
+	if best, err := pickBest(rows, false /* preferByPrice? no, semua sama harga */); err != nil {
+		return 0, nil, err
+	} else if best != nil && best.Score >= minSimPriceMatch {
 		return best.ID, best, nil
 	}
-	return 0, best, sql.ErrNoRows
+	// catatan: kalau best==nil atau similarity < ambang, lanjut ke nearest price
+
+	// 3) Nearest price dalam toleransi (max{±2.000, ±5%})
+	tolPct := int64(math.Round(float64(rounded) * tolPctNearest))
+	tol := tolAbsDefault
+	if tolPct > tol {
+		tol = tolPct
+	}
+
+	rows, err = tx.Query(
+		`SELECT barang_id, nama_barang, CAST(harga_jual AS SIGNED)
+        FROM barang
+        WHERE is_active=1 
+        AND ABS(CAST(harga_jual AS SIGNED) - ?) <= ?
+        ORDER BY ABS(CAST(harga_jual AS SIGNED) - ?) ASC
+        LIMIT 50`, rounded, tol, rounded)
+	if err != nil {
+		return 0, nil, err
+	}
+	if best, err := pickBest(rows, true /* preferByPrice */); err != nil {
+		return 0, nil, err
+	} else if best != nil && best.Score >= minSimPriceMatch {
+		return best.ID, best, nil
+	}
+
+	// 4) Fallback terakhir: LIKE (tetap rank dengan nama > harga)
+	rows, err = tx.Query(
+		`SELECT barang_id, nama_barang, CAST(harga_jual AS SIGNED)
+        FROM barang
+        WHERE is_active=1 AND nama_barang LIKE ?
+        LIMIT 50`, "%"+name+"%")
+	if err != nil {
+		return 0, nil, err
+	}
+	if best, err := pickBest(rows, false /* prefer name similarity */); err != nil {
+		return 0, nil, err
+	} else if best != nil && best.Score >= minSimLike {
+		return best.ID, best, nil
+	}
+
+	return 0, nil, sql.ErrNoRows
 }
 func abs64(x int64) int64 {
 	if x < 0 {

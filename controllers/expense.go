@@ -12,7 +12,7 @@ import (
 type ExpenseInput struct {
 	Tanggal    string  `json:"tanggal"`              // "YYYY-MM-DD"
 	Kategori   string  `json:"kategori"`             // "gaji" | "listrik" | "transport"
-	Metode     string  `json:"metode"`               // "kas" | "bank" 
+	Metode     string  `json:"metode"`               // "kas" | "bank"
 	Jumlah     float64 `json:"jumlah"`               // nominal
 	Keterangan string  `json:"keterangan,omitempty"` // optional
 	UserID     *int    `json:"user_id,omitempty"`    // optional
@@ -68,8 +68,8 @@ func CreateExpense(c *fiber.Ctx) error {
 		"transport": "5-204", // Beban Transportasi
 	}
 	creditMap := map[string]string{
-		"kas":   "1-101", // Kas
-		"bank":  "1-102", // Bank
+		"kas":  "1-101", // Kas
+		"bank": "1-102", // Bank
 		// "utang": "2-101", // Utang Usaha (jika dicatat akrual)
 	}
 	debitKode, ok := debitMap[in.Kategori]
@@ -107,6 +107,22 @@ func CreateExpense(c *fiber.Ctx) error {
 	userID := 1
 	if in.UserID != nil && *in.UserID > 0 {
 		userID = *in.UserID
+	}
+
+	// Cek saldo akun kredit (kas/bank) sampai tanggal transaksi
+	saldo, err := getSaldoAkunUpTo(tx, creditID, in.Tanggal)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"message": "Gagal cek saldo kas/bank"})
+	}
+	if saldo < in.Jumlah {
+		return c.Status(400).JSON(fiber.Map{
+			"message": "Saldo tidak mencukupi. Isi Kas/Bank terlebih dahulu.",
+			"akun":    in.Metode,
+			"saldo":   saldo,
+			"butuh":   in.Jumlah,
+			"kurang":  in.Jumlah - saldo,
+			"saran":   "Tambah saldo lewat menu Modal (Debit Kas/Bank, Kredit Modal).",
+		})
 	}
 
 	// buat header jurnal

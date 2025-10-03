@@ -33,22 +33,26 @@ func ensureTimeFormat(timeStr string) string {
 
 
 func makeTanggal(rawDate string, rawTime sql.NullString) string {
-
+    // Ambil bagian tanggal saja
     datePart := rawDate
     if len(datePart) >= 10 {
         datePart = rawDate[:10]
     }
 
-
+    // Jika ada jam dari penjualan, gabungkan sebagai waktu lokal Asia/Jakarta
     if rawTime.Valid && rawTime.String != "" {
         loc, _ := time.LoadLocation("Asia/Jakarta")
         ts := fmt.Sprintf("%s %s", datePart, ensureTimeFormat(rawTime.String))
         if t, err := time.ParseInLocation("2006-01-02 15:04:05", ts, loc); err == nil {
+            // Pilih salah satu:
+            // 1) kirim full RFC3339 dengan offset +07:00
+            // return t.Format(time.RFC3339) // contoh: 2025-09-16T17:12:00+07:00
 
+            // 2) atau kalau UI hanya butuh tanggal:
             return t.Format("2006-01-02")
         }
     }
-    return datePart 
+    return datePart // fallback: hanya tanggal
 }
 
 func GetJurnalList() ([]Jurnal, error) {

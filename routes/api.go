@@ -57,6 +57,8 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/api/barang/prefill", controllers.PrefillBarang)
 	app.Get("/api/barang/search", controllers.SearchBarang)
 
+	app.Post("/api/barang/quick-create", handlers.CreateBarangQuick)
+
 	//akuntansi
 	app.Get("/api/akuntansi/journal-entries", handlers.GetJurnalHandler)
 	app.Get("/api/akuntansi/journal-adjustments", handlers.GetJournalAdjustments) //belum dibuat
